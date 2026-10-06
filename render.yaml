@@ -1,0 +1,12 @@
+# Render Blueprint (optional path): "New → Blueprint" if the GitHub account
+# is connected. The primary path in README.md (public repo URL) ignores this
+# file — both produce the same service.
+services:
+  - type: web
+    name: genopoisk-media
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: node media-server.mjs
+    healthCheckPath: /health

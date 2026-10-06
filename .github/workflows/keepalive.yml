@@ -1,0 +1,52 @@
+# Keep-alive for the Render free web service (spins down after 15 min of
+# inactivity → ~50 s cold start for viewers). A ping every 10 minutes keeps
+# it permanently awake.
+#
+# This repo is PUBLIC on purpose: scheduled workflows in public repos get
+# unlimited Actions minutes (private repos would burn the 2000 min/month
+# quota at */10). No secrets are used or needed — the URL below is public.
+#
+# The daily commit job keeps the repository "active" so GitHub never
+# auto-disables the schedule after 60 idle days.
+
+name: Keepalive
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # ping every 10 minutes
+    - cron: '30 2 * * *'    # one activity commit per day
+  workflow_dispatch:
+
+# UPDATED_AFTER_DEPLOY: paste the real service URL below once it exists.
+# Placeholder intentionally 404s loudly so it can't be mistaken for success.
+env:
+  SERVICE_URL: https://genopoisk-media-placeholder.onrender.com
+
+permissions:
+  contents: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /health
+        run: |
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 "$SERVICE_URL/health")"
+          echo "HTTP $code from $SERVICE_URL/health"
+          if [ "$code" != "200" ]; then
+            echo "::warning::keepalive ping got HTTP $code (service may be spinning up or down)"
+          fi
+
+  keep-active:
+    if: github.event.schedule == '30 2 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Commit timestamp (prevents 60-day schedule auto-disable)
+        run: |
+          date -u > .last-keepalive
+          git config user.name "keepalive-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add .last-keepalive
+          git commit -m "keepalive: $(cat .last-keepalive)" || echo "nothing to commit"
+          git push

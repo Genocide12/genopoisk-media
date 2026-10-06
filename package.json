@@ -1,0 +1,13 @@
+{
+  "name": "genopoisk-media",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Genopoisk streaming media proxy (video CDN → player), zero dependencies",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node media-server.mjs"
+  }
+}
