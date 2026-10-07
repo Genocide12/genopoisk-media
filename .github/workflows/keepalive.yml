@@ -17,10 +17,9 @@ on:
     - cron: '30 2 * * *'    # one activity commit per day
   workflow_dispatch:
 
-# UPDATED_AFTER_DEPLOY: paste the real service URL below once it exists.
-# Placeholder intentionally 404s loudly so it can't be mistaken for success.
+# UPDATED_AFTER_DEPLOY: real service URL (deployed 2026-10-07, egress ALLOWED).
 env:
-  SERVICE_URL: https://genopoisk-media-placeholder.onrender.com
+  SERVICE_URL: https://genopoisk-media.onrender.com
 
 permissions:
   contents: write
