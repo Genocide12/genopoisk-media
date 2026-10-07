@@ -1,4 +1,8 @@
-// STREAMING MEDIA PROXY for the video CDN (v177) — SERVERLESS (Node) runtime.
+// STREAMING MEDIA PROXY for the video CDN (v211) — SERVERLESS (Node) runtime.
+// Порт из Genocide12/Genopoisk f090698 (v177..v180) — общий владелец.
+// v211: HANG PROTECTION — таймаут старта ответа 12с + одна авто-повторка;
+// разрыв апстрима при уходе клиента (res close). Лечение замираний плеера
+// на сетевом уровне, незаметно для зрителя (см. блок v211 ниже в handler).
 //
 // WHY: the video CDN (*.interkh.com) serves manifests (.mpd/.m3u8) and
 // subtitles to any IP, but returns HTTP 410 Gone for MEDIA SEGMENTS
@@ -141,7 +145,7 @@ function rewriteMpd(text, manifestUrl, origin) {
 
 // m3u8: rewrite URI="..." tag attributes and playlist lines. Relative
 // lines resolve against the ORIGINAL upstream playlist URL, then wrap.
-// Already-wrapped (proxied) lines are genopoisk URLs → not on the
+// Already-wrapped (proxied) lines are filmotiv URLs → not on the
 // allowlist → left untouched (natural double-wrap guard).
 function rewriteM3u8(text, playlistUrl, origin) {
   return text.split('\n').map(function (line) {
@@ -188,7 +192,7 @@ export default async function handler(req, res) {
       return res.end('Method not allowed');
     }
 
-    const host = req.headers.host || 'genopoisk.vercel.app';
+    const host = req.headers.host || 'filmotiv.vercel.app';
     const url = new URL(req.url, 'https://' + host);
     const rawUpstream = upstreamFromRequest(url);
     if (!rawUpstream) { res.writeHead(400, CORS_HEADERS); return res.end('Bad proxy URL'); }
@@ -223,11 +227,64 @@ export default async function handler(req, res) {
     };
     if (req.headers.range) reqHeaders['Range'] = req.headers.range;
 
-    const upstream = await fetch(up.href, {
-      method: req.method,
-      headers: reqHeaders,
-      redirect: 'follow'
-    });
+    // v211 — HANG PROTECTION (лечение «плеер перестаёт загружать видео»).
+    // Замер прод-зондом (scripts/probe_token_rotation.js, 2026-10-04):
+    // токены сегментов НЕ 30-минутные (t= живёт ~10 дней), сегмент с «чужим»
+    // свежим токеном отвечает 206 — так что первопричина замираний не токены,
+    // а ЗАВИСШИЕ СОЕДИНЕНИЯ: (1) у прокси не было таймаута — зависший fetch
+    // к CDN держал слот undici-пула до 300с; (2) при скрабе/паузе dash.js рвёт
+    // загрузку сегмента, но апстрим-фетч продолжал качать «в никуда»,
+    // удерживая пул. Через ~полчаса таких зомби пул исчерпывается → новые
+    // сегменты стоят в очереди → буфер высыхает → видео замирает. Отмотка
+    // помогает потому, что за секунды до неё зомби успевают завершиться.
+    // Лечение — прозрачное для плеера (видит обычный 200):
+    //   • 12с на СТАРТ ответа (до заголовков), затем ОДНА авто-повторка на
+    //     свежем соединении;
+    //   • разрыв апстрима при уходе клиента (res close) — пул не засоряется.
+    // Трансляция тела таймаутом НЕ накрывается: таймер снят после заголовков.
+    const FM_HEADERS_TIMEOUT_MS = 12000;
+
+    function fetchUpstream(href) {
+      const ctrl = new AbortController();
+      let timer = setTimeout(function () {
+        timer = null;
+        try { ctrl.abort(new Error('fm-headers-timeout')); } catch (_) {}
+      }, FM_HEADERS_TIMEOUT_MS);
+      const settle = function () { if (timer) { clearTimeout(timer); timer = null; } };
+      // клиент ушёл (скраб/пауза/закрытие плеера/конец стрима) → рвём апстрим
+      res.on('close', function () {
+        settle();
+        try { ctrl.abort(); } catch (_) {}
+      });
+      return fetch(href, {
+        method: req.method,
+        headers: reqHeaders,
+        redirect: 'follow',
+        signal: ctrl.signal
+      }).then(function (r) { settle(); return r; },
+              function (e) { settle(); throw e; });
+    }
+
+    let upstream = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2 && !upstream; attempt++) {
+      try {
+        const r = await fetchUpstream(up.href);
+        if (r.status >= 500 && attempt === 0) {
+          // транзиентный 5xx от CDN-эджа → слить мелкое тело и повторить
+          try { await r.arrayBuffer(); } catch (_) {}
+          lastErr = new Error('upstream ' + r.status);
+          continue;
+        }
+        upstream = r;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    if (!upstream) {
+      res.writeHead(504, { 'Content-Type': 'text/plain', ...CORS_HEADERS });
+      return res.end('Upstream timeout after retry (' + (lastErr && lastErr.message || 'unknown') + ')');
+    }
 
     const ct = upstream.headers.get('content-type') || '';
 
